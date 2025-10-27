@@ -1,0 +1,1039 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Truth Social API Gateway",
+    "description": "OpenAPI definition for the Next.js wrapper that re-implements the public methods of the truthbrush Python client.",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Profiles",
+      "description": "User discovery and relationship endpoints"
+    },
+    {
+      "name": "Timelines",
+      "description": "Status and hashtag retrieval"
+    },
+    {
+      "name": "Metadata",
+      "description": "Supplemental data such as trending groups and rate limits"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human readable error message"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "WrappedArrayResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
+      "WrappedObjectResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
+      "RateLimitResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "remaining": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resetAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "data"
+        ]
+      }
+    }
+  },
+  "paths": {
+    "/api/lookup": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Lookup profile",
+        "description": "Retrieve a Truth Social profile by account handle.",
+        "parameters": [
+          {
+            "name": "acct",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Truth Social account handle (e.g. `realdonaldtrump`)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile lookup succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Federated search",
+        "description": "Search accounts, statuses, or hashtags via Truth Social's `/v2/search` endpoint.",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "accounts",
+                "hashtags",
+                "statuses"
+              ]
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 80,
+              "default": 40
+            }
+          },
+          {
+            "name": "resolve",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "minId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "0"
+            }
+          },
+          {
+            "name": "maxId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results grouped by entity type.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameter supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hashtag": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Hashtag timeline",
+        "description": "Retrieve posts containing the specified hashtag.",
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hashtag without the `#` prefix."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of posts containing the hashtag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid hashtag parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trending": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Trending truths",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Collection of trending truths.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/group-posts": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Group timeline",
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Posts inside the requested group timeline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing group identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Trending tags",
+        "responses": {
+          "200": {
+            "description": "Current trending hashtag metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/suggested": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Suggested accounts",
+        "parameters": [
+          {
+            "name": "maximum",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of suggested accounts to follow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trending-groups": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Trending groups",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of trending group truths.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/group-tags": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Trending group tags",
+        "responses": {
+          "200": {
+            "description": "Trending topics inside Truth Social groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/suggested-groups": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Suggested groups",
+        "parameters": [
+          {
+            "name": "maximum",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suggested groups for the authenticated user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ads": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Ads feed",
+        "parameters": [
+          {
+            "name": "device",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "desktop",
+                "mobile"
+              ],
+              "default": "desktop"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current Rumble Ad Platform payloads shown in Truth Social.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedObjectResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-likes": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Users who liked a status",
+        "parameters": [
+          {
+            "name": "post",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Status URL or ID."
+          },
+          {
+            "name": "includeAll",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "top",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 40
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of users who liked the status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comments": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "Comments on a status",
+        "parameters": [
+          {
+            "name": "post",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeAll",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "onlyFirst",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "top",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 40
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of comments matching the filters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-followers": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Followers list",
+        "description": "List followers for a user. Either `userHandle` or `userId` must be provided.",
+        "parameters": [
+          {
+            "name": "userHandle",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maximum",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1000
+            }
+          },
+          {
+            "name": "resume",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional `max_id` cursor returned from a previous request."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of follower accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing both `userHandle` and `userId` parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-following": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Following list",
+        "description": "List accounts followed by a user. Either `userHandle` or `userId` must be provided.",
+        "parameters": [
+          {
+            "name": "userHandle",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maximum",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1000
+            }
+          },
+          {
+            "name": "resume",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of followee accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing both `userHandle` and `userId` parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/statuses": {
+      "get": {
+        "tags": [
+          "Timelines"
+        ],
+        "summary": "User statuses",
+        "description": "Retrieve statuses for the given user with optional filters.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "replies",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "pinned",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "createdAfter",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "sinceId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of statuses in reverse chronological order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WrappedArrayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required username parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream request failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ratelimit": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Rate limit snapshot",
+        "responses": {
+          "200": {
+            "description": "Most recent rate limit headers captured from Truth Social.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
