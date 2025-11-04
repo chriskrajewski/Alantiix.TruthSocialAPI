@@ -1,6 +1,7 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Analytics } from "@vercel/analytics/next"
 
 export const metadata: Metadata = {
   title: "Truth Social API Gateway",
@@ -11,6 +12,8 @@ export default function RootLayout(props: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>{props.children}</body>
+      <Analytics/>
     </html>
+    
   );
 }
