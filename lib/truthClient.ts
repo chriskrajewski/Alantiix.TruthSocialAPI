@@ -22,29 +22,64 @@ type RateLimitInfo = {
 
 type HeaderMap = Record<string, string>;
 
+// Browser session for Playwright-based requests (local/container only)
 type BrowserSession = {
   page: any;
-  context: any;
   browser: any;
   token: string;
 };
 
-let sessionPromise: Promise<BrowserSession> | null = null;
+let browserSessionPromise: Promise<BrowserSession> | null = null;
+let useNativeFetch: boolean | null = null;
+
+function getToken(): string {
+  const token = process.env.TRUTHSOCIAL_TOKEN;
+  if (!token) {
+    throw new TruthApiError(
+      "TRUTHSOCIAL_TOKEN not configured. Run the token refresh workflow.",
+      401
+    );
+  }
+  return token;
+}
+
+async function nativeFetchRequest(
+  url: string,
+  token: string
+): Promise<{ status: number; headers: HeaderMap; body: string }> {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json, text/plain, */*",
+      "User-Agent": USER_AGENT,
+    },
+  });
+
+  const headers: HeaderMap = {};
+  response.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+
+  const body = await response.text();
+  return { status: response.status, headers, body };
+}
 
 async function getBrowserSession(): Promise<BrowserSession> {
-  if (!sessionPromise) {
-    sessionPromise = (async () => {
+  if (!browserSessionPromise) {
+    browserSessionPromise = (async () => {
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({ userAgent: USER_AGENT });
       const page = await context.newPage();
 
-      // Navigate to Truth Social to establish Cloudflare clearance
       console.log("[TruthClient] Launching browser session...");
-      await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(3000);
+      await page.goto(`${BASE_URL}/login`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      await page.waitForTimeout(10000);
 
-      // Dismiss cookie banner if present
+      // Dismiss cookie banner
       try {
         const acceptCookies = page.locator(
           '#cookiescript_accept, [data-cs-action="accept"], button:has-text("Accept")'
@@ -57,108 +92,15 @@ async function getBrowserSession(): Promise<BrowserSession> {
         // no banner
       }
 
-      // Authenticate
-      const token = await authenticate(page, context);
+      const token = getToken();
       console.log("[TruthClient] Browser session ready.");
-
-      return { page, context, browser, token };
+      return { page, browser, token };
     })().catch((error) => {
-      sessionPromise = null;
+      browserSessionPromise = null;
       throw error;
     });
   }
-
-  return sessionPromise;
-}
-
-async function authenticate(
-  page: any,
-  context: any
-): Promise<string> {
-  // If we have a pre-set token, just use it
-  const existingToken = process.env.TRUTHSOCIAL_TOKEN;
-  if (existingToken) {
-    console.log("[TruthClient] Using existing TRUTHSOCIAL_TOKEN.");
-    return existingToken;
-  }
-
-  const username = process.env.TRUTHSOCIAL_USERNAME;
-  const password = process.env.TRUTHSOCIAL_PASSWORD;
-
-  if (!username || !password) {
-    throw new TruthApiError(
-      "Truth Social credentials not configured. Set TRUTHSOCIAL_TOKEN or TRUTHSOCIAL_USERNAME/TRUTHSOCIAL_PASSWORD.",
-      401
-    );
-  }
-
-  let token: string | null = null;
-
-  // Listen for the OAuth token response
-  page.on("response", async (response: any) => {
-    const url: string = response.url();
-    if (
-      url.includes("/oauth") &&
-      url.includes("token") &&
-      response.status() === 200
-    ) {
-      try {
-        const json = await response.json();
-        if (json.access_token) {
-          token = json.access_token;
-        }
-      } catch {
-        // ignore
-      }
-    }
-  });
-
-  // Click Sign In
-  const signInButton = page.locator('button:has-text("Sign In")');
-  await signInButton.waitFor({ state: "visible", timeout: 15000 });
-  await signInButton.click();
-  await page.waitForTimeout(2000);
-
-  // Fill login form
-  const emailInput = page.locator(
-    'input[type="text"], input[type="email"], input[name="username"], input[placeholder*="email" i], input[placeholder*="username" i]'
-  );
-  await emailInput.first().waitFor({ state: "visible", timeout: 15000 });
-  await emailInput.first().fill(username);
-
-  const passwordInput = page.locator('input[type="password"]');
-  await passwordInput.first().fill(password);
-
-  // Submit
-  const submitButton = page.locator(
-    'button[type="submit"], form button:has-text("Log"), form button:has-text("Sign")'
-  );
-  await submitButton.first().click();
-
-  // Wait for token
-  await page.waitForTimeout(10000);
-
-  if (!token) {
-    throw new TruthApiError(
-      "Failed to authenticate with Truth Social: no token received.",
-      401
-    );
-  }
-
-  return token;
-}
-
-function normalizeHeaders(
-  headers: Record<string, string> | undefined
-): HeaderMap {
-  const map: HeaderMap = {};
-  if (!headers) return map;
-  for (const [key, value] of Object.entries(headers)) {
-    if (key && typeof value === "string") {
-      map[key.toLowerCase()] = value;
-    }
-  }
-  return map;
+  return browserSessionPromise;
 }
 
 function sanitizeBody(body: string, maxLength = 400) {
@@ -245,7 +187,7 @@ class TruthSocialClient {
       resolve = true,
       offset = 0,
       minId = "0",
-      maxId
+      maxId,
     } = params;
 
     const collected: unknown[] = [];
@@ -260,8 +202,8 @@ class TruthSocialClient {
           limit: Math.min(40, limit - collected.length),
           offset: currentOffset,
           min_id: minId,
-          ...(maxId ? { max_id: maxId } : {})
-        }
+          ...(maxId ? { max_id: maxId } : {}),
+        },
       });
 
       if (!response || this.isEmptyResult(response)) break;
@@ -303,7 +245,7 @@ class TruthSocialClient {
 
   suggestedGroups(maximum = 50) {
     return this.get("/v1/truth/suggestions/groups", {
-      searchParams: { limit: maximum }
+      searchParams: { limit: maximum },
     });
   }
 
@@ -356,7 +298,7 @@ class TruthSocialClient {
       replies = false,
       createdAfter,
       sinceId,
-      pinned = false
+      pinned = false,
     } = opts;
     const user = await this.lookupRequired(username);
     const userId = user.id;
@@ -379,7 +321,7 @@ class TruthSocialClient {
     while (true) {
       const { body } = (await this.get(`/v1/accounts/${userId}/statuses`, {
         searchParams,
-        raw: true
+        raw: true,
       })) as { body: Array<Record<string, any>> };
 
       const posts = [...(body ?? [])].sort((a, b) =>
@@ -512,43 +454,17 @@ class TruthSocialClient {
     url: string,
     attempt = 0
   ): Promise<{ body: any; next: string | null }> {
-    const session = await getBrowserSession();
-
-    // Execute fetch inside the browser page context to leverage Cloudflare clearance
-    const result = await session.page.evaluate(
-      async ({ url, token }: { url: string; token: string }) => {
-        const resp = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/json, text/plain, */*"
-          }
-        });
-
-        const headers: Record<string, string> = {};
-        resp.headers.forEach((value: string, key: string) => {
-          headers[key.toLowerCase()] = value;
-        });
-
-        const body = await resp.text();
-        return { status: resp.status, headers, body };
-      },
-      { url, token: session.token }
-    );
-
-    const headerMap = result.headers as HeaderMap;
+    const token = getToken();
+    const result = await this.doFetch(url, token);
+    const headerMap = result.headers;
     this.captureRateLimit(headerMap);
 
     // Handle 401 - token expired
     if (result.status === 401) {
-      if (attempt >= MAX_RATE_LIMIT_RETRIES) {
-        throw new TruthApiError(
-          "Authentication failed: check Truth Social credentials.",
-          401
-        );
-      }
-      // Reset session to re-authenticate
-      sessionPromise = null;
-      return this.request(url, attempt + 1);
+      throw new TruthApiError(
+        "Authentication failed: TRUTHSOCIAL_TOKEN is expired. Trigger the refresh workflow.",
+        401
+      );
     }
 
     // Handle rate limiting
@@ -584,6 +500,57 @@ class TruthSocialClient {
     return { body: data, next };
   }
 
+  private async doFetch(
+    url: string,
+    token: string
+  ): Promise<{ status: number; headers: HeaderMap; body: string }> {
+    // First request: try native fetch. If it gets Cloudflare'd, switch to Playwright.
+    if (useNativeFetch === null) {
+      try {
+        const result = await nativeFetchRequest(url, token);
+        if (result.status === 403 && result.body.includes("Cloudflare")) {
+          console.log(
+            "[TruthClient] Native fetch blocked by Cloudflare, switching to Playwright..."
+          );
+          useNativeFetch = false;
+        } else {
+          useNativeFetch = true;
+          return result;
+        }
+      } catch {
+        useNativeFetch = false;
+      }
+    }
+
+    if (useNativeFetch) {
+      return nativeFetchRequest(url, token);
+    }
+
+    // Playwright path
+    const session = await getBrowserSession();
+    const result = await session.page.evaluate(
+      async ({ url, token }: { url: string; token: string }) => {
+        const resp = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json, text/plain, */*",
+          },
+        });
+
+        const headers: Record<string, string> = {};
+        resp.headers.forEach((value: string, key: string) => {
+          headers[key.toLowerCase()] = value;
+        });
+
+        const body = await resp.text();
+        return { status: resp.status, headers, body };
+      },
+      { url, token }
+    );
+
+    return result as { status: number; headers: HeaderMap; body: string };
+  }
+
   private parseNextLink(linkHeader: string | undefined | null) {
     if (!linkHeader) return null;
     const links = linkHeader.split(",");
@@ -610,7 +577,7 @@ class TruthSocialClient {
     this.rateLimit = {
       limit: limit ? Number(limit) : undefined,
       remaining: remaining ? Number(remaining) : undefined,
-      resetAt: reset ? new Date(reset) : undefined
+      resetAt: reset ? new Date(reset) : undefined,
     };
   }
 
