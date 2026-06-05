@@ -31,16 +31,6 @@ type RateLimitInfo = {
 
 type HeaderMap = Record<string, string>;
 
-// Browser session for Playwright-based requests (local/container only)
-type BrowserSession = {
-  page: any;
-  browser: any;
-  token: string;
-};
-
-let browserSessionPromise: Promise<BrowserSession> | null = null;
-let useNativeFetch: boolean | null = null;
-
 function getToken(): string {
   const token = process.env.TRUTHSOCIAL_TOKEN;
   if (!token) {
@@ -52,7 +42,7 @@ function getToken(): string {
   return token;
 }
 
-async function nativeFetchRequest(
+async function proxiedFetch(
   url: string,
   token: string
 ): Promise<{ status: number; headers: HeaderMap; body: string }> {
@@ -77,45 +67,6 @@ async function nativeFetchRequest(
 
   const body = await response.text();
   return { status: response.status, headers, body };
-}
-
-async function getBrowserSession(): Promise<BrowserSession> {
-  if (!browserSessionPromise) {
-    browserSessionPromise = (async () => {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ headless: true });
-      const context = await browser.newContext({ userAgent: USER_AGENT });
-      const page = await context.newPage();
-
-      console.log("[TruthClient] Launching browser session...");
-      await page.goto(`${BASE_URL}/login`, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-      });
-      await page.waitForTimeout(10000);
-
-      // Dismiss cookie banner
-      try {
-        const acceptCookies = page.locator(
-          '#cookiescript_accept, [data-cs-action="accept"], button:has-text("Accept")'
-        );
-        if (await acceptCookies.first().isVisible()) {
-          await acceptCookies.first().click();
-          await page.waitForTimeout(1000);
-        }
-      } catch {
-        // no banner
-      }
-
-      const token = getToken();
-      console.log("[TruthClient] Browser session ready.");
-      return { page, browser, token };
-    })().catch((error) => {
-      browserSessionPromise = null;
-      throw error;
-    });
-  }
-  return browserSessionPromise;
 }
 
 function sanitizeBody(body: string, maxLength = 400) {
@@ -470,7 +421,19 @@ class TruthSocialClient {
     attempt = 0
   ): Promise<{ body: any; next: string | null }> {
     const token = getToken();
-    const result = await this.doFetch(url, token);
+
+    let result;
+    try {
+      result = await proxiedFetch(url, token);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown network error.";
+      throw new TruthApiError(
+        `Failed to reach Truth Social API: ${message}`,
+        502
+      );
+    }
+
     const headerMap = result.headers;
     this.captureRateLimit(headerMap);
 
@@ -513,57 +476,6 @@ class TruthSocialClient {
 
     const next = this.parseNextLink(headerMap["link"]);
     return { body: data, next };
-  }
-
-  private async doFetch(
-    url: string,
-    token: string
-  ): Promise<{ status: number; headers: HeaderMap; body: string }> {
-    // First request: try native fetch. If it gets Cloudflare'd, switch to Playwright.
-    if (useNativeFetch === null) {
-      try {
-        const result = await nativeFetchRequest(url, token);
-        if (result.status === 403 && result.body.includes("Cloudflare")) {
-          console.log(
-            "[TruthClient] Native fetch blocked by Cloudflare, switching to Playwright..."
-          );
-          useNativeFetch = false;
-        } else {
-          useNativeFetch = true;
-          return result;
-        }
-      } catch {
-        useNativeFetch = false;
-      }
-    }
-
-    if (useNativeFetch) {
-      return nativeFetchRequest(url, token);
-    }
-
-    // Playwright path
-    const session = await getBrowserSession();
-    const result = await session.page.evaluate(
-      async ({ url, token }: { url: string; token: string }) => {
-        const resp = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/json, text/plain, */*",
-          },
-        });
-
-        const headers: Record<string, string> = {};
-        resp.headers.forEach((value: string, key: string) => {
-          headers[key.toLowerCase()] = value;
-        });
-
-        const body = await resp.text();
-        return { status: resp.status, headers, body };
-      },
-      { url, token }
-    );
-
-    return result as { status: number; headers: HeaderMap; body: string };
   }
 
   private parseNextLink(linkHeader: string | undefined | null) {
