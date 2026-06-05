@@ -784,17 +784,26 @@ class TruthSocialClient {
       );
     }
 
+    console.log("[TruthSocial Auth] Response status:", response.status);
+    console.log("[TruthSocial Auth] Response headers:", JSON.stringify(headers, null, 2));
+    console.log("[TruthSocial Auth] Response body (first 500 chars):", typeof response.body === "string" ? response.body.slice(0, 500) : response.body);
+
     let payload: any;
     try {
       payload = JSON.parse(response.body);
-    } catch {
+    } catch (parseError) {
+      console.error("[TruthSocial Auth] JSON parse failed:", parseError instanceof Error ? parseError.message : parseError);
+      console.error("[TruthSocial Auth] Raw body type:", typeof response.body);
       throw new TruthApiError(
         "Truth Social authentication response missing token.",
         502
       );
     }
 
+    console.log("[TruthSocial Auth] Parsed payload keys:", Object.keys(payload));
+
     if (!payload.access_token) {
+      console.error("[TruthSocial Auth] No access_token in payload. Full payload:", JSON.stringify(payload, null, 2));
       throw new TruthApiError(
         "Truth Social authentication response missing token.",
         502
