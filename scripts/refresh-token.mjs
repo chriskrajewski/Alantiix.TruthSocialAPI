@@ -16,6 +16,7 @@ import { chromium } from "playwright";
 
 const USERNAME = process.env.TRUTHSOCIAL_USERNAME;
 const PASSWORD = process.env.TRUTHSOCIAL_PASSWORD;
+const PROXY_URL = process.env.PROXY_URL || undefined;
 
 if (!USERNAME || !PASSWORD) {
   console.error("TRUTHSOCIAL_USERNAME and TRUTHSOCIAL_PASSWORD must be set.");
@@ -26,10 +27,17 @@ const BASE_URL = "https://truthsocial.com";
 
 async function extractToken() {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
+  const contextOptions = {
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  });
+  };
+
+  if (PROXY_URL) {
+    console.error(`[refresh-token] Using proxy: ${PROXY_URL.replace(/:[^:@]+@/, ':***@')}`);
+    contextOptions.proxy = { server: PROXY_URL };
+  }
+
+  const context = await browser.newContext(contextOptions);
 
   const page = await context.newPage();
 
@@ -54,10 +62,11 @@ async function extractToken() {
 
   try {
     console.error("[refresh-token] Navigating to login page...");
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // Wait for page to settle (Cloudflare / SPA hydration)
-    await page.waitForTimeout(3000);
+    // Wait for page to settle — allow up to 15s for Cloudflare challenge
+    console.error("[refresh-token] Waiting for page to settle...");
+    await page.waitForTimeout(10000);
     console.error(`[refresh-token] Current URL: ${page.url()}`);
 
     // Dismiss cookie consent banner if present

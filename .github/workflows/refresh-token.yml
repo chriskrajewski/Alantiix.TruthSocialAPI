@@ -28,6 +28,7 @@ jobs:
         env:
           TRUTHSOCIAL_USERNAME: ${{ secrets.TRUTHSOCIAL_USERNAME }}
           TRUTHSOCIAL_PASSWORD: ${{ secrets.TRUTHSOCIAL_PASSWORD }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           TOKEN=$(node scripts/refresh-token.mjs)
           echo "::add-mask::$TOKEN"
