@@ -8,7 +8,7 @@ on:
 
 jobs:
   refresh:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,17 +18,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Playwright
-        run: |
-          npm install playwright
-          npx playwright install chromium --with-deps
+      - name: Install dependencies
+        run: npm ci
 
       - name: Extract token
         id: token
         env:
           TRUTHSOCIAL_USERNAME: ${{ secrets.TRUTHSOCIAL_USERNAME }}
           TRUTHSOCIAL_PASSWORD: ${{ secrets.TRUTHSOCIAL_PASSWORD }}
-          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           TOKEN=$(node scripts/refresh-token.mjs)
           echo "::add-mask::$TOKEN"
@@ -41,12 +38,7 @@ jobs:
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
           NEW_TOKEN: ${{ steps.token.outputs.value }}
         run: |
-          # Try to remove existing env var (ignore errors if it doesn't exist)
-          curl -s -X DELETE \
-            "https://api.vercel.com/v1/projects/${VERCEL_PROJECT_ID}/env/TRUTHSOCIAL_TOKEN${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
-            -H "Authorization: Bearer $VERCEL_TOKEN" || true
-
-          # Find and delete by name if the above didn't work
+          # Find and delete existing env var
           ENV_ID=$(curl -s \
             "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
             -H "Authorization: Bearer $VERCEL_TOKEN" \

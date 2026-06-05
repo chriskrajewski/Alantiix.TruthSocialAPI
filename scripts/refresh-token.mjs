@@ -16,7 +16,6 @@ import { chromium } from "playwright";
 
 const USERNAME = process.env.TRUTHSOCIAL_USERNAME;
 const PASSWORD = process.env.TRUTHSOCIAL_PASSWORD;
-const PROXY_URL = process.env.PROXY_URL || undefined;
 
 if (!USERNAME || !PASSWORD) {
   console.error("TRUTHSOCIAL_USERNAME and TRUTHSOCIAL_PASSWORD must be set.");
@@ -27,17 +26,10 @@ const BASE_URL = "https://truthsocial.com";
 
 async function extractToken() {
   const browser = await chromium.launch({ headless: true });
-  const contextOptions = {
+  const context = await browser.newContext({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  };
-
-  if (PROXY_URL) {
-    console.error(`[refresh-token] Using proxy: ${PROXY_URL.replace(/:[^:@]+@/, ':***@')}`);
-    contextOptions.proxy = { server: PROXY_URL };
-  }
-
-  const context = await browser.newContext(contextOptions);
+  });
 
   const page = await context.newPage();
 
@@ -46,7 +38,6 @@ async function extractToken() {
   // Intercept the OAuth token response
   page.on("response", async (response) => {
     const url = response.url();
-    // Match both /oauth/token and /oauth/v2/token
     if (url.includes("/oauth") && url.includes("token") && response.status() === 200) {
       try {
         const json = await response.json();
@@ -64,7 +55,7 @@ async function extractToken() {
     console.error("[refresh-token] Navigating to login page...");
     await page.goto(`${BASE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // Wait for page to settle — allow up to 15s for Cloudflare challenge
+    // Wait for page to settle (Cloudflare challenge + SPA hydration)
     console.error("[refresh-token] Waiting for page to settle...");
     await page.waitForTimeout(10000);
     console.error(`[refresh-token] Current URL: ${page.url()}`);
@@ -72,8 +63,7 @@ async function extractToken() {
     // Dismiss cookie consent banner if present
     try {
       const acceptCookies = page.locator('#cookiescript_accept, [data-cs-action="accept"], button:has-text("Accept")');
-      const cookieBanner = await acceptCookies.first().isVisible();
-      if (cookieBanner) {
+      if (await acceptCookies.first().isVisible()) {
         console.error("[refresh-token] Dismissing cookie banner...");
         await acceptCookies.first().click();
         await page.waitForTimeout(1000);
@@ -82,24 +72,28 @@ async function extractToken() {
       // No cookie banner, continue
     }
 
-    // Click the "Sign In" button to open the login form
-    console.error("[refresh-token] Clicking Sign In button...");
-    const signInButton = page.locator('button:has-text("Sign In")');
-    await signInButton.waitFor({ state: "visible", timeout: 15000 });
-    await signInButton.click();
-
-    // Wait for the login form to appear
-    await page.waitForTimeout(2000);
-
-    // Now look for the form inputs
-    console.error("[refresh-token] Waiting for login form...");
+    // Check if login form is already visible or we need to click Sign In
     const emailInput = page.locator('input[type="text"], input[type="email"], input[name="username"], input[placeholder*="email" i], input[placeholder*="username" i]');
+    const passwordInput = page.locator('input[type="password"]');
+    const signInButton = page.locator('button:has-text("Sign In")');
+
+    const formVisible = await passwordInput.first().isVisible().catch(() => false);
+
+    if (!formVisible) {
+      const signInVisible = await signInButton.isVisible().catch(() => false);
+      if (signInVisible) {
+        console.error("[refresh-token] Clicking Sign In button...");
+        await signInButton.click();
+        await page.waitForTimeout(2000);
+      }
+    }
+
+    // Fill login form
+    console.error("[refresh-token] Waiting for login form...");
     await emailInput.first().waitFor({ state: "visible", timeout: 15000 });
 
     console.error("[refresh-token] Filling credentials...");
     await emailInput.first().fill(USERNAME);
-
-    const passwordInput = page.locator('input[type="password"]');
     await passwordInput.first().fill(PASSWORD);
 
     // Submit the form
@@ -112,20 +106,15 @@ async function extractToken() {
     await page.waitForTimeout(10000);
 
     if (!token) {
-      // Try a bit longer
       await page.waitForTimeout(5000);
     }
 
     if (!token) {
       console.error("[refresh-token] Could not extract token. Final URL:", page.url());
-      // Take a screenshot for debugging
-      await page.screenshot({ path: "scripts/failed-login.png", fullPage: true });
-      console.error("[refresh-token] Screenshot saved to scripts/failed-login.png");
       process.exit(1);
     }
 
     console.error("[refresh-token] Token extracted successfully.");
-    // Output token on stdout (clean, no prefix) for downstream consumption
     console.log(token);
   } finally {
     await browser.close();

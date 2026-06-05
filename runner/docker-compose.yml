@@ -1,0 +1,12 @@
+services:
+  github-runner:
+    build: .
+    container_name: truthsocial-runner
+    restart: unless-stopped
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPOSITORY=${GITHUB_REPOSITORY}
+      - RUNNER_NAME=truthsocial-docker-runner
+      - RUNNER_LABELS=self-hosted,linux,x64
+    # Uses host network so it gets your residential IP
+    network_mode: host
