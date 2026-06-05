@@ -1,4 +1,5 @@
 import "server-only";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { TruthApiError } from "./errors";
 
 const BASE_URL = "https://truthsocial.com";
@@ -7,6 +8,14 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const MAX_RATE_LIMIT_RETRIES = 2;
+
+const PROXY_URL =
+  process.env.PROXY_URL ??
+  process.env.https_proxy ??
+  process.env.http_proxy ??
+  process.env.HTTPS_PROXY ??
+  process.env.HTTP_PROXY ??
+  undefined;
 
 type TruthRequestOptions = {
   searchParams?: Record<string, string | number | boolean | undefined>;
@@ -47,13 +56,19 @@ async function nativeFetchRequest(
   url: string,
   token: string
 ): Promise<{ status: number; headers: HeaderMap; body: string }> {
-  const response = await fetch(url, {
+  const fetchOptions: any = {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json, text/plain, */*",
       "User-Agent": USER_AGENT,
     },
-  });
+  };
+
+  if (PROXY_URL) {
+    fetchOptions.dispatcher = new ProxyAgent(PROXY_URL);
+  }
+
+  const response = await undiciFetch(url, fetchOptions);
 
   const headers: HeaderMap = {};
   response.headers.forEach((value, key) => {
