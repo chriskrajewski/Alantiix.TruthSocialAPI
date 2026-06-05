@@ -1,38 +1,12 @@
 import "server-only";
-import type { SessionOptions } from "node-tls-client";
-import { ClientIdentifier, Session, initTLS } from "node-tls-client";
 import { TruthApiError } from "./errors";
 
 const BASE_URL = "https://truthsocial.com";
 const API_BASE_URL = `${BASE_URL}/api`;
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0";
-const CLIENT_ID = "9X1Fdd-pxNsAgEDNi_SfhJWi8T-vLuV2WVzKIbkTCw4";
-const CLIENT_SECRET = "ozF8jzI4968oTKFkEnsBC-UbLPCdrSv0MkXGQu2o_-M";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const MAX_RATE_LIMIT_RETRIES = 2;
-
-const DEFAULT_HEADERS = {
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
-  "Sec-CH-UA":
-    '"Chromium";v="131", "Not;A=Brand";v="24", "Google Chrome";v="131"',
-  "Sec-CH-UA-Mobile": "?0",
-  "Sec-CH-UA-Platform": '"macOS"',
-  Origin: BASE_URL,
-  Referer: `${BASE_URL}/`,
-  "User-Agent": USER_AGENT
-} as const;
-
-const PROXY_URL =
-  process.env.http_proxy ??
-  process.env.https_proxy ??
-  process.env.HTTP_PROXY ??
-  process.env.HTTPS_PROXY ??
-  undefined;
 
 type TruthRequestOptions = {
   searchParams?: Record<string, string | number | boolean | undefined>;
@@ -48,76 +22,154 @@ type RateLimitInfo = {
 
 type HeaderMap = Record<string, string>;
 
-let tlsSessionPromise: Promise<Session> | null = null;
+type BrowserSession = {
+  page: any;
+  context: any;
+  browser: any;
+  token: string;
+};
 
-async function getTlsSession(): Promise<Session> {
-  if (!tlsSessionPromise) {
-    tlsSessionPromise = (async () => {
-      await initTLS();
-      const options: SessionOptions = {
-        clientIdentifier: ClientIdentifier.chrome_131,
-        timeout: 30000
-      };
-      if (PROXY_URL) {
-        options.proxy = PROXY_URL;
+let sessionPromise: Promise<BrowserSession> | null = null;
+
+async function getBrowserSession(): Promise<BrowserSession> {
+  if (!sessionPromise) {
+    sessionPromise = (async () => {
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
+
+      // Navigate to Truth Social to establish Cloudflare clearance
+      console.log("[TruthClient] Launching browser session...");
+      await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
+      await page.waitForTimeout(3000);
+
+      // Dismiss cookie banner if present
+      try {
+        const acceptCookies = page.locator(
+          '#cookiescript_accept, [data-cs-action="accept"], button:has-text("Accept")'
+        );
+        if (await acceptCookies.first().isVisible()) {
+          await acceptCookies.first().click();
+          await page.waitForTimeout(1000);
+        }
+      } catch {
+        // no banner
       }
-      return new Session(options);
+
+      // Authenticate
+      const token = await authenticate(page, context);
+      console.log("[TruthClient] Browser session ready.");
+
+      return { page, context, browser, token };
     })().catch((error) => {
-      tlsSessionPromise = null;
+      sessionPromise = null;
       throw error;
     });
   }
 
-  return await tlsSessionPromise;
+  return sessionPromise;
 }
 
-function sanitizeBody(body: string, maxLength = 400) {
-  if (!body) {
-    return "";
+async function authenticate(
+  page: any,
+  context: any
+): Promise<string> {
+  // If we have a pre-set token, just use it
+  const existingToken = process.env.TRUTHSOCIAL_TOKEN;
+  if (existingToken) {
+    console.log("[TruthClient] Using existing TRUTHSOCIAL_TOKEN.");
+    return existingToken;
   }
-  const text = body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-  if (!text) {
-    return "";
+
+  const username = process.env.TRUTHSOCIAL_USERNAME;
+  const password = process.env.TRUTHSOCIAL_PASSWORD;
+
+  if (!username || !password) {
+    throw new TruthApiError(
+      "Truth Social credentials not configured. Set TRUTHSOCIAL_TOKEN or TRUTHSOCIAL_USERNAME/TRUTHSOCIAL_PASSWORD.",
+      401
+    );
   }
-  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+
+  let token: string | null = null;
+
+  // Listen for the OAuth token response
+  page.on("response", async (response: any) => {
+    const url: string = response.url();
+    if (
+      url.includes("/oauth") &&
+      url.includes("token") &&
+      response.status() === 200
+    ) {
+      try {
+        const json = await response.json();
+        if (json.access_token) {
+          token = json.access_token;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  // Click Sign In
+  const signInButton = page.locator('button:has-text("Sign In")');
+  await signInButton.waitFor({ state: "visible", timeout: 15000 });
+  await signInButton.click();
+  await page.waitForTimeout(2000);
+
+  // Fill login form
+  const emailInput = page.locator(
+    'input[type="text"], input[type="email"], input[name="username"], input[placeholder*="email" i], input[placeholder*="username" i]'
+  );
+  await emailInput.first().waitFor({ state: "visible", timeout: 15000 });
+  await emailInput.first().fill(username);
+
+  const passwordInput = page.locator('input[type="password"]');
+  await passwordInput.first().fill(password);
+
+  // Submit
+  const submitButton = page.locator(
+    'button[type="submit"], form button:has-text("Log"), form button:has-text("Sign")'
+  );
+  await submitButton.first().click();
+
+  // Wait for token
+  await page.waitForTimeout(10000);
+
+  if (!token) {
+    throw new TruthApiError(
+      "Failed to authenticate with Truth Social: no token received.",
+      401
+    );
+  }
+
+  return token;
 }
 
 function normalizeHeaders(
-  headers:
-    | Record<string, string | string[] | undefined>
-    | undefined
+  headers: Record<string, string> | undefined
 ): HeaderMap {
   const map: HeaderMap = {};
-
-  if (!headers) {
-    return map;
-  }
-
+  if (!headers) return map;
   for (const [key, value] of Object.entries(headers)) {
-    if (!key) {
-      continue;
-    }
-    const normalizedKey = key.toLowerCase();
-    if (Array.isArray(value)) {
-      if (value.length > 0) {
-        map[normalizedKey] = value.join(", ");
-      }
-    } else if (typeof value === "string") {
-      map[normalizedKey] = value;
+    if (key && typeof value === "string") {
+      map[key.toLowerCase()] = value;
     }
   }
-
   return map;
 }
 
-class TruthSocialClient {
-  private token: string | null;
-  private tokenPromise: Promise<string> | null = null;
-  private rateLimit: RateLimitInfo = {};
+function sanitizeBody(body: string, maxLength = 400) {
+  if (!body) return "";
+  const text = body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
 
-  constructor() {
-    this.token = process.env.TRUTHSOCIAL_TOKEN ?? null;
-  }
+class TruthSocialClient {
+  private rateLimit: RateLimitInfo = {};
 
   getRateLimit(): RateLimitInfo {
     return { ...this.rateLimit };
@@ -130,9 +182,7 @@ class TruthSocialClient {
     const postId = this.extractId(post);
     const includeAll = opts.includeAll ?? false;
     const top = opts.top ?? 40;
-    if (top < 1) {
-      return [];
-    }
+    if (top < 1) return [];
 
     const results: unknown[] = [];
     for await (const page of this.paginated(
@@ -141,12 +191,9 @@ class TruthSocialClient {
     )) {
       for (const user of page as unknown[]) {
         results.push(user);
-        if (!includeAll && results.length >= top) {
-          return results;
-        }
+        if (!includeAll && results.length >= top) return results;
       }
     }
-
     return results;
   }
 
@@ -158,9 +205,7 @@ class TruthSocialClient {
     const includeAll = opts.includeAll ?? false;
     const onlyFirst = opts.onlyFirst ?? false;
     const top = opts.top ?? 40;
-    if (top < 1) {
-      return [];
-    }
+    if (top < 1) return [];
 
     const results: unknown[] = [];
     for await (const page of this.paginated(
@@ -173,20 +218,15 @@ class TruthSocialClient {
           !onlyFirst
         ) {
           results.push(item);
-          if (!includeAll && results.length >= top) {
-            return results;
-          }
+          if (!includeAll && results.length >= top) return results;
         }
       }
     }
-
     return results;
   }
 
   lookup(acct: string) {
-    return this.get("/v1/accounts/lookup", {
-      searchParams: { acct }
-    });
+    return this.get("/v1/accounts/lookup", { searchParams: { acct } });
   }
 
   async search(params: {
@@ -224,10 +264,7 @@ class TruthSocialClient {
         }
       });
 
-      if (!response || this.isEmptyResult(response)) {
-        break;
-      }
-
+      if (!response || this.isEmptyResult(response)) break;
       collected.push(response);
       currentOffset += 40;
     }
@@ -241,9 +278,7 @@ class TruthSocialClient {
   }
 
   trending(limit = 10) {
-    return this.get(`/v1/truth/trending/truths`, {
-      searchParams: { limit }
-    });
+    return this.get(`/v1/truth/trending/truths`, { searchParams: { limit } });
   }
 
   groupPosts(groupId: string, limit = 20) {
@@ -255,15 +290,11 @@ class TruthSocialClient {
   }
 
   suggested(maximum = 50) {
-    return this.get("/v2/suggestions", {
-      searchParams: { limit: maximum }
-    });
+    return this.get("/v2/suggestions", { searchParams: { limit: maximum } });
   }
 
   trendingGroups(limit = 10) {
-    return this.get("/v1/truth/trends/groups", {
-      searchParams: { limit }
-    });
+    return this.get("/v1/truth/trends/groups", { searchParams: { limit } });
   }
 
   groupTags() {
@@ -277,9 +308,7 @@ class TruthSocialClient {
   }
 
   ads(device = "desktop") {
-    return this.get("/v3/truth/ads", {
-      searchParams: { device }
-    });
+    return this.get("/v3/truth/ads", { searchParams: { device } });
   }
 
   async userFollowers(opts: {
@@ -340,10 +369,7 @@ class TruthSocialClient {
       params.exclude_replies = "true";
     }
 
-    const sinceDate = createdAfter
-      ? new Date(createdAfter)
-      : undefined;
-
+    const sinceDate = createdAfter ? new Date(createdAfter) : undefined;
     const results: Array<Record<string, any>> = [];
     const sinceComparable = sinceId ? BigInt(sinceId) : undefined;
 
@@ -360,38 +386,22 @@ class TruthSocialClient {
         BigInt(a.id) > BigInt(b.id) ? -1 : 1
       );
 
-      if (!posts.length) {
-        break;
-      }
+      if (!posts.length) break;
 
       for (const post of posts) {
         post._pulled = new Date().toISOString();
         const createdAt = new Date(post.created_at);
-        if (sinceDate && createdAt <= sinceDate) {
+        if (sinceDate && createdAt <= sinceDate) return results;
+        if (sinceComparable && BigInt(post.id) <= sinceComparable)
           return results;
-        }
-        if (sinceComparable && BigInt(post.id) <= sinceComparable) {
-          return results;
-        }
-
         results.push(post);
       }
 
       const nextId = posts.at(-1)?.id;
-      if (!nextId) {
-        break;
-      }
-
-      if (lastId === nextId) {
-        break;
-      }
-
+      if (!nextId) break;
+      if (lastId === nextId) break;
       lastId = nextId;
-
-      searchParams = {
-        ...searchParams,
-        max_id: nextId
-      };
+      searchParams = { ...searchParams, max_id: nextId };
     }
 
     return results;
@@ -402,9 +412,7 @@ class TruthSocialClient {
   }
 
   private isEmptyResult(response: unknown) {
-    if (!response || typeof response !== "object") {
-      return true;
-    }
+    if (!response || typeof response !== "object") return true;
     return Object.values(response).every(
       (value) =>
         value === null ||
@@ -436,9 +444,7 @@ class TruthSocialClient {
     for await (const page of this.paginated(path, {}, resume)) {
       for (const entry of page as unknown[]) {
         output.push(entry);
-        if (maximum && output.length >= maximum) {
-          return output;
-        }
+        if (maximum && output.length >= maximum) return output;
       }
     }
     return output;
@@ -449,16 +455,11 @@ class TruthSocialClient {
     let total = 0;
     for await (const page of this.paginated(path)) {
       const items = (page as unknown[]) ?? [];
-      if (!items.length) {
-        break;
-      }
+      if (!items.length) break;
       collected.push(...items);
       total += items.length;
-      if (total >= limit) {
-        break;
-      }
+      if (total >= limit) break;
     }
-
     return collected.slice(0, limit);
   }
 
@@ -467,7 +468,7 @@ class TruthSocialClient {
     params?: Record<string, string | number | boolean>,
     resume?: string
   ) {
-    let nextUrl: URL | null = new URL(`${API_BASE_URL}${path}`);
+    let nextUrl: string | null = `${API_BASE_URL}${path}`;
     const searchParams = new URLSearchParams();
 
     if (params) {
@@ -475,12 +476,12 @@ class TruthSocialClient {
         searchParams.set(key, String(value));
       }
     }
-
     if (resume) {
       searchParams.set("max_id", resume);
     }
 
-    nextUrl.search = searchParams.toString();
+    const qs = searchParams.toString();
+    if (qs) nextUrl += `?${qs}`;
 
     while (nextUrl) {
       const response = await this.request(nextUrl);
@@ -493,91 +494,85 @@ class TruthSocialClient {
     path: string,
     options: TruthRequestOptions = {}
   ): Promise<unknown> {
-    const url = new URL(`${API_BASE_URL}${path}`);
+    let url = `${API_BASE_URL}${path}`;
     if (options.searchParams) {
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(options.searchParams)) {
-        if (value !== undefined) {
-          params.set(key, String(value));
-        }
+        if (value !== undefined) params.set(key, String(value));
       }
-      url.search = params.toString();
+      const qs = params.toString();
+      if (qs) url += `?${qs}`;
     }
 
-    const response = await this.request(url, { signal: options.signal });
+    const response = await this.request(url);
     return options.raw ? response : response.body;
   }
 
   private async request(
-    url: URL,
-    options: { signal?: AbortSignal } = {},
+    url: string,
     attempt = 0
-  ): Promise<{ body: any; next: URL | null }> {
-    const token = await this.ensureToken();
-    const session = await getTlsSession();
-    const headers = {
-      ...DEFAULT_HEADERS,
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    };
+  ): Promise<{ body: any; next: string | null }> {
+    const session = await getBrowserSession();
 
-    let response;
-    try {
-      response = await session.get(url.toString(), {
-        headers,
-        followRedirects: true
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unknown network error.";
-      throw new TruthApiError(
-        `Failed to reach Truth Social API: ${message}`,
-        502
-      );
-    }
+    // Execute fetch inside the browser page context to leverage Cloudflare clearance
+    const result = await session.page.evaluate(
+      async ({ url, token }: { url: string; token: string }) => {
+        const resp = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json, text/plain, */*"
+          }
+        });
 
-    const headerMap = normalizeHeaders(response.headers);
+        const headers: Record<string, string> = {};
+        resp.headers.forEach((value: string, key: string) => {
+          headers[key.toLowerCase()] = value;
+        });
+
+        const body = await resp.text();
+        return { status: resp.status, headers, body };
+      },
+      { url, token: session.token }
+    );
+
+    const headerMap = result.headers as HeaderMap;
     this.captureRateLimit(headerMap);
 
-    if (response.status === 401) {
-      this.invalidateToken();
-      const retryToken = await this.ensureToken();
-      if (retryToken === token) {
+    // Handle 401 - token expired
+    if (result.status === 401) {
+      if (attempt >= MAX_RATE_LIMIT_RETRIES) {
         throw new TruthApiError(
           "Authentication failed: check Truth Social credentials.",
           401
         );
       }
-      if (attempt >= MAX_RATE_LIMIT_RETRIES) {
-        throw new TruthApiError(
-          "Authentication failed after retrying with refreshed credentials.",
-          401
-        );
-      }
-      return this.request(url, options, attempt + 1);
+      // Reset session to re-authenticate
+      sessionPromise = null;
+      return this.request(url, attempt + 1);
     }
 
+    // Handle rate limiting
     const shouldRetry = await this.handleRateLimiting(
-      response.status,
+      result.status,
       headerMap,
       attempt
     );
     if (shouldRetry) {
-      return this.request(url, options, attempt + 1);
+      return this.request(url, attempt + 1);
     }
 
-    if (response.status >= 400) {
-      const sanitized = sanitizeBody(response.body);
+    if (result.status >= 400) {
+      const sanitized = sanitizeBody(result.body);
       const suffix = sanitized ? `: ${sanitized}` : "";
       throw new TruthApiError(
-        `Truth Social API request failed (${response.status})${suffix}`,
-        response.status
+        `Truth Social API request failed (${result.status})${suffix}`,
+        result.status
       );
     }
 
     let data;
     try {
-      data = JSON.parse(response.body);
+      data = JSON.parse(result.body);
     } catch {
       throw new TruthApiError(
         "Failed to decode JSON response from Truth Social.",
@@ -590,16 +585,15 @@ class TruthSocialClient {
   }
 
   private parseNextLink(linkHeader: string | undefined | null) {
-    if (!linkHeader) {
-      return null;
-    }
+    if (!linkHeader) return null;
     const links = linkHeader.split(",");
     for (const link of links) {
       const [urlPart, relPart] = link.split(";");
       if (relPart && relPart.includes('rel="next"')) {
         const cleaned = urlPart.trim().replace(/^<|>$/g, "");
         try {
-          return new URL(cleaned);
+          new URL(cleaned);
+          return cleaned;
         } catch {
           return null;
         }
@@ -628,18 +622,17 @@ class TruthSocialClient {
     const remainingRaw = headers["x-ratelimit-remaining"];
     const remaining = remainingRaw ? Number(remainingRaw) : undefined;
 
-    if (!Number.isNaN(remaining) && remaining !== undefined && remaining <= 50) {
+    if (
+      !Number.isNaN(remaining) &&
+      remaining !== undefined &&
+      remaining <= 50
+    ) {
       const waitMs = this.computeResetDelay(headers["x-ratelimit-reset"]);
       await this.delay(waitMs);
     }
 
-    if (status !== 429) {
-      return false;
-    }
-
-    if (attempt >= MAX_RATE_LIMIT_RETRIES) {
-      return false;
-    }
+    if (status !== 429) return false;
+    if (attempt >= MAX_RATE_LIMIT_RETRIES) return false;
 
     const retryDelay = Math.max(
       this.parseRetryAfter(headers["retry-after"]),
@@ -652,165 +645,31 @@ class TruthSocialClient {
   }
 
   private parseRetryAfter(header?: string): number {
-    if (!header) {
-      return 0;
-    }
-
+    if (!header) return 0;
     const numeric = Number(header);
-    if (!Number.isNaN(numeric) && numeric >= 0) {
-      return numeric * 1000;
-    }
-
+    if (!Number.isNaN(numeric) && numeric >= 0) return numeric * 1000;
     const date = new Date(header);
-    if (!Number.isNaN(date.getTime())) {
-      return date.getTime() - Date.now();
-    }
-
+    if (!Number.isNaN(date.getTime())) return date.getTime() - Date.now();
     return 0;
   }
 
   private computeResetDelay(header?: string): number {
-    if (!header) {
-      return 0;
-    }
-
+    if (!header) return 0;
     const numeric = Number(header);
     if (!Number.isNaN(numeric)) {
-      if (numeric > 1e12) {
-        // Likely milliseconds since epoch
-        return numeric - Date.now();
-      }
-      if (numeric > 1e8) {
-        // Likely seconds since epoch
-        return numeric * 1000 - Date.now();
-      }
-      if (numeric >= 0) {
-        // Treat as relative seconds
-        return numeric * 1000;
-      }
+      if (numeric > 1e12) return numeric - Date.now();
+      if (numeric > 1e8) return numeric * 1000 - Date.now();
+      if (numeric >= 0) return numeric * 1000;
     }
-
     const date = new Date(header);
-    if (!Number.isNaN(date.getTime())) {
-      return date.getTime() - Date.now();
-    }
-
+    if (!Number.isNaN(date.getTime())) return date.getTime() - Date.now();
     return 0;
   }
 
   private async delay(ms: number) {
     const clamped = Math.min(Math.max(ms, 0), 120000);
-    if (clamped <= 0) {
-      return;
-    }
+    if (clamped <= 0) return;
     await new Promise((resolve) => setTimeout(resolve, clamped));
-  }
-
-  private invalidateToken() {
-    this.token = null;
-    this.tokenPromise = null;
-  }
-
-  private async ensureToken(): Promise<string> {
-    if (this.token) {
-      return this.token;
-    }
-    if (this.tokenPromise) {
-      return this.tokenPromise;
-    }
-
-    const username = process.env.TRUTHSOCIAL_USERNAME;
-    const password = process.env.TRUTHSOCIAL_PASSWORD;
-
-    if (!username || !password) {
-      throw new TruthApiError(
-        "Truth Social credentials not configured. Set TRUTHSOCIAL_TOKEN or TRUTHSOCIAL_USERNAME/TRUTHSOCIAL_PASSWORD.",
-        401
-      );
-    }
-
-    this.tokenPromise = this.login(username, password)
-      .then((newToken) => {
-        this.token = newToken;
-        return newToken;
-      })
-      .finally(() => {
-        this.tokenPromise = null;
-      });
-
-    return this.tokenPromise;
-  }
-
-  private async login(username: string, password: string) {
-    const session = await getTlsSession();
-    let response;
-    try {
-      response = await session.post(`${BASE_URL}/oauth/token`, {
-        headers: {
-          ...DEFAULT_HEADERS,
-          "Content-Type": "application/json",
-          Origin: BASE_URL,
-          Referer: `${BASE_URL}/`
-        },
-        followRedirects: true,
-        body: JSON.stringify({
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET,
-          grant_type: "password",
-          username,
-          password,
-          redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
-          scope: "read"
-        })
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unknown network error.";
-      throw new TruthApiError(
-        `Failed to reach Truth Social login endpoint: ${message}`,
-        502
-      );
-    }
-
-    const headers = normalizeHeaders(response.headers);
-    this.captureRateLimit(headers);
-
-    if (response.status >= 400) {
-      const sanitized = sanitizeBody(response.body);
-      const suffix = sanitized ? `: ${sanitized}` : "";
-      throw new TruthApiError(
-        `Failed to authenticate with Truth Social (${response.status})${suffix}`,
-        response.status
-      );
-    }
-
-    console.log("[TruthSocial Auth] Response status:", response.status);
-    console.log("[TruthSocial Auth] Response headers:", JSON.stringify(headers, null, 2));
-    console.log("[TruthSocial Auth] Response body (first 500 chars):", typeof response.body === "string" ? response.body.slice(0, 500) : response.body);
-
-    let payload: any;
-    try {
-      payload = JSON.parse(response.body);
-    } catch (parseError) {
-      console.error("[TruthSocial Auth] JSON parse failed:", parseError instanceof Error ? parseError.message : parseError);
-      console.error("[TruthSocial Auth] Raw body type:", typeof response.body);
-      throw new TruthApiError(
-        "Truth Social authentication response missing token.",
-        502
-      );
-    }
-
-    console.log("[TruthSocial Auth] Parsed payload keys:", Object.keys(payload));
-
-    if (!payload.access_token) {
-      console.error("[TruthSocial Auth] No access_token in payload. Full payload:", JSON.stringify(payload, null, 2));
-      throw new TruthApiError(
-        "Truth Social authentication response missing token.",
-        502
-      );
-    }
-
-    return payload.access_token as string;
   }
 }
 

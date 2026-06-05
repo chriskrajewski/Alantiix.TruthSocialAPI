@@ -1,0 +1,67 @@
+name: Refresh Truth Social Token
+
+on:
+  schedule:
+    # Run every 12 hours
+    - cron: "0 */12 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          npm install playwright
+          npx playwright install chromium --with-deps
+
+      - name: Extract token
+        id: token
+        env:
+          TRUTHSOCIAL_USERNAME: ${{ secrets.TRUTHSOCIAL_USERNAME }}
+          TRUTHSOCIAL_PASSWORD: ${{ secrets.TRUTHSOCIAL_PASSWORD }}
+        run: |
+          TOKEN=$(node scripts/refresh-token.mjs)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Update Vercel env var
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          NEW_TOKEN: ${{ steps.token.outputs.value }}
+        run: |
+          # Try to remove existing env var (ignore errors if it doesn't exist)
+          curl -s -X DELETE \
+            "https://api.vercel.com/v1/projects/${VERCEL_PROJECT_ID}/env/TRUTHSOCIAL_TOKEN${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" || true
+
+          # Find and delete by name if the above didn't work
+          ENV_ID=$(curl -s \
+            "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            | python3 -c "import sys,json; envs=json.load(sys.stdin).get('envs',[]); matches=[e['id'] for e in envs if e.get('key')=='TRUTHSOCIAL_TOKEN']; print(matches[0] if matches else '')")
+
+          if [ -n "$ENV_ID" ]; then
+            curl -s -X DELETE \
+              "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env/${ENV_ID}${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
+              -H "Authorization: Bearer $VERCEL_TOKEN"
+          fi
+
+          # Create new env var for all environments
+          curl -s -X POST \
+            "https://api.vercel.com/v10/projects/${VERCEL_PROJECT_ID}/env${VERCEL_TEAM_ID:+?teamId=$VERCEL_TEAM_ID}" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"key\":\"TRUTHSOCIAL_TOKEN\",\"value\":\"$NEW_TOKEN\",\"type\":\"encrypted\",\"target\":[\"production\",\"preview\",\"development\"]}"
+
+          echo "✅ TRUTHSOCIAL_TOKEN updated on Vercel"
